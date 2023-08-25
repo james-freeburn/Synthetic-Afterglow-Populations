@@ -34,14 +34,13 @@ def GRB_spectrum(E,E_p):
 def GRB_params(theta_js,Gamma_0s,E_iso,E_ps,zs,d_Ls,band,rng,nevents):
     
     # Truncated log-normal distribution for GRB duration.
-    upper3,lower3 = np.log(1e5),np.log(2.0)
-    mu3, sigma3 = np.log(27.5),0.35
-    T90 = np.exp(stats.truncnorm(
-            (lower3 - mu3)/sigma3, 
-            (upper3 - mu3)/sigma3, 
-            loc=mu3, 
-            scale=sigma3).rvs(
-        nevents,random_state=rng))
+    mu3, sigma3 = 27.5,0.35
+    T90 = [0.]*nevents
+    for i in range(nevents):
+        roll = stats.lognorm.rvs(sigma3, scale=mu3)
+        while roll < 2.0:
+            roll = stats.lognorm.rvs(sigma3, scale=mu3, size=nevents)
+        T90[i] = roll
     
     # Calculating peak luminosity of GRB and bolometric flux of GRB
     Lpeak = 2.*E_iso*(1.+np.array(zs))/T90
