@@ -31,15 +31,31 @@ def GRB_spectrum(E,E_p):
         return ((alpha-beta)*E_0/100.)**(alpha-beta)*np.exp(
             beta-alpha)*(E/100.)**beta
 
-def GRB_params(theta_js,Gamma_0s,E_iso,E_ps,zs,d_Ls,band,rng,nevents):
+def generate_GRBs(nevents):
+    mu_gamma = 1.95
+    sigma_gamma = 0.65
+    sigma_theta_j = 0.3
     
+    m = 2.5
+    q = 1.45
+    
+    log_Gamma_0s = rng.normal(mu_gamma,sigma_gamma,nevents)
+    log_theta_js = np.array([rng.normal((-1./m)*log_Gamma_0 + q,sigma_theta_j) 
+                             for log_Gamma_0 in log_Gamma_0s])
+    Gamma_0s = 10**log_Gamma_0s
+    theta_js = (np.pi/180.)*10**log_theta_js
+    mask = (Gamma_0s > 1.) & (Gamma_0s < 8e3) & (theta_js < np.pi/2.) 
+    
+    return Gamma_0s[mask],theta_js[mask]
+
+def GRB_params(theta_js,Gamma_0s,E_iso,E_ps,zs,d_Ls,band,rng,nevents):
     # Truncated log-normal distribution for GRB duration.
     mu3, sigma3 = 27.5,0.35
     T90 = [0.]*nevents
     for i in range(nevents):
-        roll = stats.lognorm.rvs(sigma3, scale=mu3)
+        roll = 10**(rng.normal(np.log10(mu3),sigma3))
         while roll < 2.0:
-            roll = stats.lognorm.rvs(sigma3, scale=mu3, size=nevents)
+            roll = 10**(rng.normal(np.log10(mu3),sigma3))
         T90[i] = roll
     
     # Calculating peak luminosity of GRB and bolometric flux of GRB
@@ -61,15 +77,15 @@ def GRB_params(theta_js,Gamma_0s,E_iso,E_ps,zs,d_Ls,band,rng,nevents):
         normalisation_factor[i] = np.trapz(spectrum*u.keV.to(u.erg)*Es,
                                            u.keV.to(u.erg)*Es)
         integrations[i] = np.trapz(spectrum[SwiftRange[0]:SwiftRange[1]]
-                                   *u.keV.to(u.erg)*
-                                   Es[SwiftRange[0]:SwiftRange[1]],
-                                   u.keV.to(u.erg)*
-                                   Es[SwiftRange[0]:SwiftRange[1]])
+                                   *u.keV.to(u.erg)
+                                   *Es[SwiftRange[0]:SwiftRange[1]],
+                                   u.keV.to(u.erg)
+                                   *Es[SwiftRange[0]:SwiftRange[1]])
         # Convert flux to a photon flux.
-        photon_integrations[i] = np.trapz(spectrum[SwiftRange[0]:
-                                                   SwiftRange[1]],
-                                          u.keV.to(u.erg)*
-                                          Es[SwiftRange[0]:SwiftRange[1]])
+        photon_integrations[i] = np.trapz(
+            spectrum[SwiftRange[0]:SwiftRange[1]],
+            u.keV.to(u.erg)
+            *Es[SwiftRange[0]:SwiftRange[1]])
         
     P = (Pbol/normalisation_factor)*integrations
     F = (Fbol/normalisation_factor)*integrations
@@ -79,57 +95,47 @@ def GRB_params(theta_js,Gamma_0s,E_iso,E_ps,zs,d_Ls,band,rng,nevents):
     
     return T90,F,P,photon_flux,Swift_GRB
 
-def population_synthesis(rng,nevents,cosmo):
-    
+def population_synthesis(rng,jet,nevents,cosmo):
     # Intrinsic energy of GRBs
     E_gamma_dash = 1.5e48
     E_p_dash = 1.5
     
-    # Lorentz factor distribution
-    mu1,sigma1 = 4.525,1.475
-    mu2,sigma2 = 1.742,0.916
-
-    # The desired covariance matrix.
-    cov = np.array([
-            [sigma2, -.87],
-            [-.87, sigma1]
-        ])
-
-    L = np.linalg.cholesky(cov)
-
-    uncorrelated = [np.log(stats.lognorm.rvs(sigma2, 
-                                             scale=np.exp(mu2), 
-                                             size=nevents)),
-                    np.log(stats.lognorm.rvs(sigma1, 
-                                             scale=np.exp(mu1), 
-                                             size=nevents))]
-    correlated = np.dot(L, uncorrelated)
-
-    uncorr_mean = [np.mean(uncorrelated[0]), np.mean(uncorrelated[1])]
-    corr_mean = [np.mean(correlated[0]), np.mean(correlated[1])]
-    correlated = correlated - np.array(
-        corr_mean).reshape(2, 1) + np.array(
-            uncorr_mean).reshape(2, 1)
-
-    X, Y = correlated
     
-    Gamma_0s = np.exp(Y)
-    theta_js = np.exp(X)*np.pi/180.
+    print('\tGenerating Data ... ')
+    Gamma_0s,theta_js = generate_GRBs(nevents)
+    nevents = len(Gamma_0s)
     
-    mask = (theta_js < np.pi/2.) & (Gamma_0s < 8e3) & (Gamma_0s > 1.)
+    print('\tGenerating theta_v values ... ')
+    # Generating probability density function for viewing angle.
+    theta = np.linspace(0.0, np.pi/2, 100000)
+    probability_density = np.sin(theta)
+    probability_density = probability_density/np.sum(probability_density)
+    thetaObs_vals = rng.choice(theta, nevents, p=probability_density)
     
-    Gamma_0s = Gamma_0s[mask]
-    theta_js = theta_js[mask]
-    
+    print('\tCalculating params ... ')
     df = pd.DataFrame([])
     df = df.assign(Gamma_0=Gamma_0s,
-                   theta_j=theta_js)
+                   theta_j=theta_js,
+                   theta_v=thetaObs_vals,
+                   Beta_0 = (1.-(1./Gamma_0s**2.))**0.5,
+                   E_gamma = E_gamma_dash*Gamma_0s)
+    
+    df = df.assign(E_p = E_p_dash*5.*df.Gamma_0/(5.-2.*df.Beta_0),
+                   Eiso = [E_gamma/(1-np.cos(theta_j)) 
+                           if 1./Gamma_0 < np.sin(theta_j) 
+                           else E_gamma*(1+Beta_0)*Gamma_0**2
+                           for E_gamma,Gamma_0,Beta_0,theta_j 
+                           in zip(df.E_gamma,df.Gamma_0,df.Beta_0,df.theta_j)])
+    print('\tAssigning redshifts ...')
+    # Placing GRBs at redshifts based on comoving volumes and SFH.
+    zs,d_Ls = GRB_redshifts(rng, len(df), cosmo)
+    df = df.assign(z=zs,d_L=d_Ls)
+    print('\tGenerating structured jet params ...')
     tlength = rng.integers(20,200,len(df))
     tGRB = [rng.integers(-tlength_val + 3, 1440) 
-                          for tlength_val in tlength]    
-    df = df.assign(Beta_0 = (1.-(1./df.Gamma_0**2.))**0.5,
-                   E_gamma = E_gamma_dash*df.Gamma_0,
-                   tlength = tlength,
+                          for tlength_val in tlength]
+    # Generating GRB times and light curve coverage.
+    df = df.assign(tlength = tlength,
                    tGRB = tGRB,
                    n0 = rng.uniform(0.1,30.,len(df)),
                    b = rng.uniform(0.0,3.0,len(df)),
@@ -138,32 +144,13 @@ def population_synthesis(rng,nevents,cosmo):
                    p = [2.3]*len(df),
                    theta_w = [rng.uniform(theta_j,np.pi/2) 
                               for theta_j in df.theta_j])
-    
-    # Generating probability density function for viewing angle.
-    theta = np.linspace(0.0, np.pi/2, 100000)
-    probability_density = np.sin(theta)
-    probability_density = probability_density/np.sum(probability_density)
-    
-    df = df.assign(theta_v=[rng.choice(theta, p=probability_density) 
-                            for theta_w in df.theta_w],
-                   E_p = E_p_dash*5.*df.Gamma_0/(5.-2.*df.Beta_0),
-                   Eiso = [E_gamma/(1-np.cos(theta_j)) 
-                           if 1./Gamma_0 < np.sin(theta_j) 
-                           else E_gamma*(1+Beta_0)*Gamma_0**2
-                           for E_gamma,Gamma_0,Beta_0,theta_j 
-                           in zip(df.E_gamma,df.Gamma_0,df.Beta_0,df.theta_j)])
-    
-    # Placing GRBs at redshifts based on comoving volumes and SFH.
-    zs,d_Ls = GRB_redshifts(rng, len(df), cosmo)
-    df = df.assign(z=zs,d_L=d_Ls)
-
     # Uniform distribution of theta_wing values (this is what we're testing)
     
     PO_mask = (df.theta_v < df.theta_j) | (np.sin(df.theta_v) < 1./df.Gamma_0)
     
-    PO_events = df[PO_mask]
-    NPO_events = df[PO_mask == False]
-    
+    PO_events = df[PO_mask].reset_index(drop=True)
+    NPO_events = df[PO_mask == False].reset_index(drop=True)
+    print('\tGenerating GRB params ...')
     T90,F,P,photon_flux,Swift_GRB = GRB_params(PO_events.theta_j,
                                                PO_events.Gamma_0,
                                                PO_events.Eiso,
@@ -172,19 +159,16 @@ def population_synthesis(rng,nevents,cosmo):
                                                PO_events.d_L,
                                                [15.,150.],
                                                rng,len(PO_events))
-    
     PO_events = PO_events.assign(T90=T90,
                                  GRB_fluence=F,
                                  GRB_flux=P,
                                  GRB_photon_flux=photon_flux,
                                  Swift_GRB=Swift_GRB)
-    
     NPO_events = NPO_events.assign(T90=np.nan,
                                    GRB_fluence=np.nan,
                                    GRB_flux=np.nan,
                                    GRB_photon_flux=np.nan,
                                    Swift_GRB=False)
-    
     df = pd.concat([PO_events,NPO_events]).reset_index(drop=True)
     
     return df[['theta_v',
@@ -224,7 +208,7 @@ def check_detectability(row):
     d = {}
 
     # For convenience, place arguments into a dict.
-    Z = {'jetType':     grb.jet.PowerLawCore,     # Power Law with Core
+    Z = {'jetType':     row.jet,     # Power Law with Core
          'specType':    0,                  # Basic Synchrotron Spectrum
          'thetaObs':    row.theta_v,   # Viewing angle in radians
          'E0':          row.Eiso, # Isotropic-equivalent energy in erg
@@ -266,14 +250,17 @@ if __name__ == "__main__":
     rng = np.random.default_rng(seed=12345)
     nevents = 10000000
     cosmo = FlatLambdaCDM(H0=70, Om0=0.3, Tcmb0=2.725)
-    out = 'GRB_afterglows_powerlaw_new.csv'
+    jet = 1
+    jet_names = ['TopHat','Gaussian','PowerlawCore','GaussianCore','Spherical',
+                 'PowerLaw']
+    out = 'GRB_afterglows_' + jet_names[jet+1] + '.csv'
 
     if os.path.exists(out):
         GRB_population = pd.read_csv(out)
     else:
         # Generating GRB parameters.
         print('Generating ',nevents,'GRB events.')
-        GRB_population = population_synthesis(rng,nevents,cosmo)
+        GRB_population = population_synthesis(rng,jet,nevents,cosmo)
         GRB_population.Swift_GRB = GRB_population.Swift_GRB.astype(bool)
         GRB_population.to_csv(out,index=False)
         print('done!')
